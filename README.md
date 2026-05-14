@@ -5,3 +5,22 @@ A set of scripts to leverage blenders python API for automatic video editing
 ## Idea
 
 Manually editing videos can be tedious, especially for long footage where most of it is boring. This script automates the editing process by creating a video in which interesting bits are kept and boring intermediat parts are sped up - an alternating time warp so to speak. Besides manually putting markers for transitions, the editing process is fully automatic.
+
+### Usage
+
+#### Manual Steps
+
+- Open the Blender Video Editor (VE)
+- Set up a text editor panel (for running the script later)
+- Load the script inside the text editor
+- Import all video footage to edit. It does not matter if they have gaps inbetween - the script will glue them together later
+- Add markers to designate sections to keep or time warp. The first marker (n=0) should be at the start of the footage. the section until the next marker (n=1) will be kept. The section from (n=1) to (n=2) will be sped up. This means that all sections n=odd to n=even will be sped up
+
+
+#### Automatic Steps - handled by script
+
+- Cut the fottage at marker locations
+- speed up sections - gaps in the footage will appear and or widen!
+- rearrange cut up strips to remove gaps inbetween
+
+
