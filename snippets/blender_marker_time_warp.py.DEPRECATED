@@ -1,0 +1,236 @@
+import bpy
+import logging
+import os
+
+# === LOGGER SETUP HELPERS ===
+def setup_logger(name, filename):
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.DEBUG)
+
+    if not logger.handlers:
+        log_path = bpy.path.abspath(f"//{filename}")
+        handler = logging.FileHandler(log_path, mode='w')
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
+    return logger
+
+# === CUTTING STRIPS AT MARKERS ===
+def cut_strips_at_markers():
+    logger = setup_logger("cut_logger", "cut_at_markers_log.txt")
+    scene = bpy.context.scene
+    markers = scene.timeline_markers
+    seq = scene.sequence_editor
+
+    if not seq:
+        logger.error("No sequence editor found. Aborting.")
+        return
+
+    marker_frames = sorted([marker.frame for marker in markers])
+    logger.info(f"Found {len(marker_frames)} markers for cutting: {marker_frames}")
+
+    for frame in marker_frames:
+        bpy.context.scene.frame_current = frame
+        logger.info(f"Cutting at frame {frame}")
+        selected_strips = []
+
+        for strip in seq.sequences_all:
+            if strip.frame_start < frame < strip.frame_final_end:
+                strip.select = True
+                selected_strips.append(strip.name)
+            else:
+                strip.select = False
+
+        logger.debug(f"Selected {len(selected_strips)} strips at frame {frame}: {selected_strips}")
+        bpy.ops.sequencer.split(frame=frame, type='SOFT', side='BOTH')
+
+    logger.info(f"✅ Completed cutting at {len(marker_frames)} markers.")
+
+# === SPEED UP EVEN INTERVALS ===
+def speed_up_sections_between_even_markers(speed_factor=30):
+    logger = setup_logger("speed_logger", "speed_up_log.txt")
+    scene = bpy.context.scene
+    seq = scene.sequence_editor
+
+    markers = sorted(scene.timeline_markers, key=lambda m: m.frame)
+    logger.info(f"📌 Found {len(markers)} markers: {[m.frame for m in markers]}")
+
+    if len(markers) < 4:
+        logger.warning("⚠️ Not enough markers (need at least 4). Exiting.")
+        return
+
+    area_type = 'SEQUENCE_EDITOR'
+    areas = [area for area in bpy.context.window.screen.areas if area.type == area_type]
+    if not areas:
+        logger.error(f"No area of type {area_type} is open. Aborting.")
+        return
+
+    def get_bounds(strip):
+        return int(strip.frame_final_start), int(strip.frame_final_end)
+
+    def trim(strip):
+        start, end = get_bounds(strip)
+        duration = max(1, int((end - start) / speed_factor))
+        strip.frame_final_end = start + duration
+        logger.debug(f"⏱️ Trimmed strip '{strip.name}' to {duration} frames.")
+        return duration
+
+    def apply_speed(strip):
+        for s in seq.sequences_all:
+            s.select = False
+        strip.select = True
+        scene.sequence_editor.active_strip = strip
+        start, end = get_bounds(strip)
+
+        try:
+            bpy.ops.sequencer.effect_strip_add(
+                type='SPEED',
+                frame_start=start,
+                frame_end=end,
+                channel=strip.channel + 1,
+                replace_sel=False
+            )
+            speed_strip = seq.sequences[-1]
+            speed_strip.speed_factor = speed_factor
+            trim(strip)
+            logger.info(f"✅ Applied speed effect to '{strip.name}' ({start}-{end})")
+        except Exception as e:
+            logger.error(f"❌ Failed on '{strip.name}': {str(e)}")
+
+    with bpy.context.temp_override(
+        window=bpy.context.window,
+        area=areas[0],
+        region=[r for r in areas[0].regions if r.type == 'WINDOW'][0],
+        screen=bpy.context.window.screen
+    ):
+        for i in range(1, len(markers)-1, 2):
+            start, end = markers[i].frame, markers[i+1].frame
+            if end <= start:
+                logger.warning(f"⚠️ Skipping invalid interval {start}–{end}")
+                continue
+
+            logger.info(f"🟦 Speeding interval {i//2}: {start} → {end}")
+            for strip in list(seq.sequences_all):
+                s_start, s_end = get_bounds(strip)
+                if s_start >= start and s_end <= end:
+                    if strip.type == 'MOVIE':
+                        apply_speed(strip)
+                    elif strip.type == 'SOUND':
+                        logger.info(f"🗑️ Deleting audio '{strip.name}'")
+                        try:
+                            seq.sequences.remove(strip)
+                        except Exception as e:
+                            logger.error(f"❌ Failed to delete '{strip.name}': {e}")
+
+# === REMOVE GAPS BETWEEN GROUPED STRIPS ===
+def remove_channel_strip_gaps():
+    logger = setup_logger("gap_logger", "strip_gap_removal_log.txt")
+    scene = bpy.context.scene
+    seq_editor = scene.sequence_editor
+
+    if not seq_editor:
+        logger.error("No sequence editor found.")
+        return
+
+    # Collect and sort all strips based on their start frame
+    strips = [s for s in seq_editor.sequences_all]
+    strips.sort(key=lambda s: s.frame_final_start)
+
+    # Group strips by "channel blocks" – meaning strips that start and end together
+    channel_strips = []
+    i_ch_s = 0
+
+    _s = strips[i_ch_s]
+    first_channel_strip = {
+        "frame_final_start": _s.frame_final_start,
+        "frame_final_end": _s.frame_final_end,
+        "strips": []
+    }
+    channel_strips.append(first_channel_strip)
+
+    # Assign strips to channel strip groups
+    for s in strips:
+        if s.frame_final_start == channel_strips[i_ch_s]["frame_final_start"]:
+            if s.frame_final_end == channel_strips[i_ch_s]["frame_final_end"]:
+                channel_strips[i_ch_s]["strips"].append(s)
+                logger.debug(f"Added strip {s.name} ({s.type}) to channel group {i_ch_s}")
+        elif s.frame_final_start < channel_strips[i_ch_s]["frame_final_start"]:
+            raise Exception(
+                f"❌ Overlap error: Missed a strip: {s.name}, {s.type}, "
+                f"({s.frame_final_start}-{s.frame_final_end}) vs. current group "
+                f"({channel_strips[i_ch_s]['frame_final_start']}-{channel_strips[i_ch_s]['frame_final_end']})"
+            )
+        elif s.frame_final_start >= channel_strips[i_ch_s]["frame_final_end"]:
+            # Start a new group when a new, non-overlapping strip is found
+            new_ch_s = {
+                "frame_final_start": s.frame_final_start,
+                "frame_final_end": s.frame_final_end,
+                "strips": [s]
+            }
+            channel_strips.append(new_ch_s)
+            i_ch_s += 1
+            logger.debug(f"Started new channel group {i_ch_s} with strip {s.name} ({s.type})")
+
+    current_frame = 0  # Tracks where the next strip group should be placed
+
+    # Iterate over each group of strips and shift them to close gaps
+    for ch_s in channel_strips:
+        ch_s_start = ch_s["frame_final_start"]
+        ch_s_end = ch_s["frame_final_end"]
+
+        offset = 0
+        if ch_s_start < current_frame:
+            raise Exception(
+                f"❌ Missed overlap: {[s.name for s in ch_s['strips']]}, "
+                f"({ch_s_start}-{ch_s_end}) vs. current_frame ({current_frame})"
+            )
+        elif ch_s_start > current_frame:
+            # If there’s a gap, calculate how much to shift
+            offset = ch_s_start - current_frame
+            for _s in ch_s["strips"]:
+                # SPEED strips are dependent on their source and shouldn't be moved independently
+                if _s.type != "SPEED":
+                    _s.frame_start = _s.frame_start - offset
+                    logger.debug(
+                        f"➡️ Shifted strip {_s.name} ({_s.type}) by {-offset} frames to new start {_s.frame_start}"
+                    )
+
+        # Update the frame position where the next block should start
+        current_frame = ch_s_end - offset
+
+# deselect all
+def deselect_all():
+
+    scene = bpy.context.scene
+    seq = scene.sequence_editor
+
+    if not seq:
+        print("No sequence editor found.")
+        return
+
+    for s in seq.sequences_all:
+            s.select = False
+
+
+# === MAIN ENTRYPOINT ===
+def main():
+    
+    deselect_all()
+
+    cut_strips_at_markers()
+
+    deselect_all()
+
+    speed_up_sections_between_even_markers()
+
+    deselect_all()
+
+    remove_channel_strip_gaps()
+
+    deselect_all()
+
+    # Optional: Log completion globally
+    print("✅ All operations completed. Logs saved to the .blend directory.")
+
+main()
