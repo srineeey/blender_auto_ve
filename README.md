@@ -13,7 +13,7 @@ Manually editing videos can be tedious, especially for long footage where most o
 - Open the Blender Video Editor (VE)
 - Set up a text editor panel (for running the script later)
 - Load the script inside the text editor
-- Import all video footage to edit. It does not matter if they have gaps inbetween - the script will glue them together later
+- Import all video footage to edit into the timeline. It does not matter if they have gaps inbetween - the script will glue them together later
 - Add markers to designate sections to keep or time warp. The first marker (n=0) should be at the start of the footage. the section until the next marker (n=1) will be kept. The section from (n=1) to (n=2) will be sped up. This means that all sections n=odd to n=even will be sped up
 
 
